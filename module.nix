@@ -19,7 +19,9 @@
 let
   cfg = config.services.terminus;
   net = "terminus-net";
-  target = "podman-compose-terminus-root.target";
+  target = "${cfg.backend}-compose-terminus-root.target";
+  netUnit = "${cfg.backend}-network-${net}.service";
+  backendPkg = config.virtualisation.${cfg.backend}.package;
 
   # Common systemd wiring for each container, mirroring the compose2nix pattern
   # already used on this host: always-restart, ordered after the network unit,
@@ -31,8 +33,8 @@ let
     }:
     {
       serviceConfig.Restart = lib.mkOverride 90 "always";
-      after = [ "podman-network-${net}.service" ] ++ after;
-      requires = [ "podman-network-${net}.service" ] ++ requires;
+      after = [ netUnit ] ++ after;
+      requires = [ netUnit ] ++ requires;
       partOf = [ target ];
       wantedBy = [ target ];
     };
@@ -40,6 +42,12 @@ in
 {
   options.services.terminus = {
     enable = lib.mkEnableOption "TRMNL Terminus server (podman OCI stack)";
+
+    backend = lib.mkOption {
+      type = lib.types.enum [ "podman" "docker" ];
+      default = "podman";
+      description = "Which virtualisation backend to use. [Default: podman]";
+    };
 
     image = lib.mkOption {
       type = lib.types.str;
@@ -99,8 +107,9 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    virtualisation.podman.enable = lib.mkDefault true;
-    virtualisation.oci-containers.backend = lib.mkDefault "podman";
+    virtualisation.podman.enable = lib.mkIf (cfg.backend == "podman") true;
+    virtualisation.docker.enable = lib.mkIf (cfg.backend == "docker") true;
+    virtualisation.oci-containers.backend = lib.mkDefault cfg.backend;
 
     # --- PostgreSQL (internal only) ---
     virtualisation.oci-containers.containers.terminus-database = {
@@ -121,7 +130,7 @@ in
         "--health-retries=3"
       ];
     };
-    systemd.services.podman-terminus-database = mkUnit { };
+    systemd.services."${cfg.backend}-terminus-database" = mkUnit { };
 
     # --- Valkey (internal only); requirepass is read from the env file so the
     # secret never lands in the nix store. ---
@@ -144,7 +153,7 @@ in
         "--health-retries=3"
       ];
     };
-    systemd.services.podman-terminus-keyvalue = mkUnit { };
+    systemd.services."${cfg.backend}-terminus-keyvalue" = mkUnit { };
 
     # --- Web (Hanami/puma); self-migrates via APP_SETUP=true ---
     virtualisation.oci-containers.containers.terminus-web = {
@@ -173,7 +182,7 @@ in
         "--health-start-period=45s"
       ];
     };
-    systemd.services.podman-terminus-web = mkUnit {
+    systemd.services."${cfg.backend}-terminus-web" = mkUnit {
       after = [ "terminus-db-ready.service" ];
       requires = [ "terminus-db-ready.service" ];
     };
@@ -210,27 +219,27 @@ in
         "--health-start-period=45s"
       ];
     };
-    systemd.services.podman-terminus-worker = mkUnit {
-      after = [ "podman-terminus-web.service" ];
-      requires = [ "podman-terminus-web.service" ];
+    systemd.services."${cfg.backend}-terminus-worker" = mkUnit {
+      after = [ "${cfg.backend}-terminus-web.service" ];
+      requires = [ "${cfg.backend}-terminus-web.service" ];
     };
 
     # --- Gate web's start (and thus its migration) on Postgres readiness ---
     systemd.services.terminus-db-ready = {
       description = "Wait for Terminus PostgreSQL to accept connections";
-      after = [ "podman-terminus-database.service" ];
-      requires = [ "podman-terminus-database.service" ];
-      before = [ "podman-terminus-web.service" ];
+      after = [ "${cfg.backend}-terminus-database.service" ];
+      requires = [ "${cfg.backend}-terminus-database.service" ];
+      before = [ "${cfg.backend}-terminus-web.service" ];
       partOf = [ target ];
       wantedBy = [ target ];
-      path = [ config.virtualisation.podman.package ];
+      path = [ backendPkg ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
         TimeoutStartSec = "180";
       };
       script = ''
-        until podman exec terminus-database pg_isready -p 5432 -q; do
+        until ${cfg.backend} exec terminus-database pg_isready -p 5432 -q; do
           echo "waiting for postgres to be ready..."
           sleep 2
         done
@@ -238,19 +247,19 @@ in
     };
 
     # --- Private bridge network + root target (compose2nix pattern) ---
-    systemd.services."podman-network-${net}" = {
-      path = [ pkgs.podman ];
+    systemd.services."${cfg.backend}-network-${net}" = {
+      path = [ backendPkg ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStop = "podman network rm -f ${net}";
+        ExecStop = "${cfg.backend} network rm -f ${net}";
       };
-      script = "podman network inspect ${net} || podman network create ${net} --driver=bridge";
+      script = "${cfg.backend} network inspect ${net} || ${cfg.backend} network create ${net} --driver=bridge";
       partOf = [ target ];
       wantedBy = [ target ];
     };
 
-    systemd.targets."podman-compose-terminus-root" = {
+    systemd.targets."${cfg.backend}-compose-terminus-root" = {
       unitConfig.Description = "Root target for the Terminus podman stack.";
       wantedBy = [ "multi-user.target" ];
     };
