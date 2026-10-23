@@ -175,9 +175,16 @@ in
         "--init"
         "--network=${net}"
         "--network-alias=web"
-        "--health-cmd=curl --fail --silent http://localhost:${toString cfg.port}/up"
+        # --health-start-period keeps podman from marking the container
+        # unhealthy while booting, but it does not delay or retry the probe
+        # itself: the first check still fires at container start, and its
+        # transient systemd unit still exits non-zero if curl fails then,
+        # which is what `nixos-rebuild switch`/deploy-rs see as a failed
+        # unit. Retrying inside curl keeps that first probe from failing
+        # while Hanami finishes booting and migrating (APP_SETUP=true).
+        "--health-cmd=curl --fail --silent --retry 12 --retry-delay 3 --retry-connrefused --retry-all-errors http://localhost:${toString cfg.port}/up"
         "--health-interval=30s"
-        "--health-timeout=10s"
+        "--health-timeout=45s"
         "--health-retries=3"
         "--health-start-period=45s"
       ];
@@ -212,9 +219,12 @@ in
         "--init"
         "--network=${net}"
         "--network-alias=worker"
-        "--health-cmd=pgrep -f sidekiq"
+        # Same first-probe race as web's healthcheck above: retry internally
+        # instead of relying on --health-start-period, which doesn't stop
+        # the transient unit for an early failed probe from exiting non-zero.
+        "--health-cmd=sh -c 'for i in $(seq 1 12); do pgrep -f sidekiq >/dev/null && exit 0; sleep 3; done; exit 1'"
         "--health-interval=30s"
-        "--health-timeout=10s"
+        "--health-timeout=45s"
         "--health-retries=3"
         "--health-start-period=45s"
       ];
